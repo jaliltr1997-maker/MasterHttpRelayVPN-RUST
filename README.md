@@ -36,6 +36,14 @@ Each release ships two binaries:
 - **`mhrv-rs`** — the CLI. Always works. Headless servers, Docker, automation. No system deps on macOS/Windows; on Linux works even without a display server.
 - **`mhrv-rs-ui`** — the desktop UI (egui). Form for the config, Start/Stop/Test buttons, live stats, recent log. macOS releases also include `mhrv-rs.app` (double-click to launch). Linux UI requires a display server and common desktop libraries (`libxkbcommon`, `libwayland-client`, `libxcb`, `libgl`, `libx11`, `libgtk-3`); install them via your distro's package manager if missing.
 
+On first run the MITM CA must be installed into the system trust store (this typically needs sudo/admin), and this is easiest to do from the CLI. Each archive therefore ships a launcher that does both steps in order:
+
+- Linux: `./run.sh`
+- macOS: `./run.command` (double-click in Finder) or `./run.sh` from a terminal
+- Windows: `run.bat`
+
+The launchers run `mhrv-rs --install-cert` once, then start `mhrv-rs-ui`. Subsequent runs can launch the UI directly.
+
 Config + the MITM CA live in the platform user-data dir:
 
 - macOS: `~/Library/Application Support/mhrv-rs/`

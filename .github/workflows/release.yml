@@ -99,6 +99,12 @@ jobs:
             cp target/${{ matrix.target }}/release/mhrv-rs-ui dist/mhrv-rs-ui
             chmod +x dist/mhrv-rs-ui
           fi
+          cp assets/launchers/run.sh dist/run.sh
+          chmod +x dist/run.sh
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            cp assets/launchers/run.command dist/run.command
+            chmod +x dist/run.command
+          fi
 
       - name: Build macOS .app bundle
         if: runner.os == 'macOS'
@@ -118,15 +124,18 @@ jobs:
           if (Test-Path target/${{ matrix.target }}/release/mhrv-rs-ui.exe) {
             Copy-Item target/${{ matrix.target }}/release/mhrv-rs-ui.exe dist/mhrv-rs-ui.exe
           }
+          Copy-Item assets/launchers/run.bat dist/run.bat
 
       - name: Make archive
         shell: bash
         run: |
           cd dist
           if [ "${{ runner.os }}" = "Windows" ]; then
-            7z a -tzip "${{ matrix.name }}.zip" mhrv-rs.exe mhrv-rs-ui.exe
+            7z a -tzip "${{ matrix.name }}.zip" mhrv-rs.exe mhrv-rs-ui.exe run.bat
+          elif [ "${{ runner.os }}" = "macOS" ]; then
+            tar czf "${{ matrix.name }}.tar.gz" mhrv-rs mhrv-rs-ui run.sh run.command
           else
-            tar czf "${{ matrix.name }}.tar.gz" mhrv-rs mhrv-rs-ui 2>/dev/null || tar czf "${{ matrix.name }}.tar.gz" mhrv-rs
+            tar czf "${{ matrix.name }}.tar.gz" mhrv-rs mhrv-rs-ui run.sh 2>/dev/null || tar czf "${{ matrix.name }}.tar.gz" mhrv-rs run.sh
           fi
 
       - uses: actions/upload-artifact@v4
