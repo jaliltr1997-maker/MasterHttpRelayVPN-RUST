@@ -142,8 +142,27 @@ fn install_linux(cert_path: &str) -> bool {
             let dest = format!("/etc/ca-certificates/trust-source/anchors/{}.crt", safe_name);
             try_copy_and_run(cert_path, &dest, &[&["trust", "extract-compat"]])
         }
+        "openwrt" => {
+            // OpenWRT itself doesn't open HTTPS connections through the proxy —
+            // LAN clients do. The CA needs to be trusted on the CLIENTS, not on
+            // the router. So this is a no-op success with guidance rather than
+            // an error.
+            tracing::info!(
+                "OpenWRT detected: the router doesn't need to trust the MITM CA. \
+                 Copy {} to each LAN client (browser / OS trust store) instead. \
+                 Example: scp root@<router>:{} ./ and import from there.",
+                cert_path, cert_path
+            );
+            true
+        }
         _ => {
-            tracing::warn!("Unknown Linux distro — install {} manually.", cert_path);
+            tracing::warn!(
+                "Unknown Linux distro — CA file is at {}. Copy it into your system's \
+                 trust anchors dir (e.g. /usr/local/share/ca-certificates/ for \
+                 Debian-like, /etc/pki/ca-trust/source/anchors/ for RHEL-like) and \
+                 run the corresponding refresh command.",
+                cert_path
+            );
             false
         }
     }
@@ -198,6 +217,10 @@ fn run_cmd(args: &[&str]) -> bool {
 }
 
 fn detect_linux_distro() -> String {
+    // Marker-file shortcuts (most reliable).
+    if Path::new("/etc/openwrt_release").exists() {
+        return "openwrt".into();
+    }
     if Path::new("/etc/debian_version").exists() {
         return "debian".into();
     }
@@ -208,16 +231,49 @@ fn detect_linux_distro() -> String {
         return "arch".into();
     }
     if let Ok(content) = std::fs::read_to_string("/etc/os-release") {
-        let lc = content.to_lowercase();
-        if lc.contains("debian") || lc.contains("ubuntu") || lc.contains("mint") {
-            return "debian".into();
+        return classify_os_release(&content);
+    }
+    "unknown".into()
+}
+
+/// Parse /etc/os-release content and return a distro family.
+///
+/// We specifically look at the `ID` and `ID_LIKE` fields (not a substring
+/// search over the whole file) because random other fields like
+/// `OPENWRT_DEVICE_ARCH=x86_64` contain substrings that false-positive on
+/// "arch". Exposed for unit testing.
+fn classify_os_release(content: &str) -> String {
+    let mut id = String::new();
+    let mut id_like = String::new();
+    for line in content.lines() {
+        let (k, v) = match line.split_once('=') {
+            Some(x) => x,
+            None => continue,
+        };
+        let v = v.trim().trim_matches('"').trim_matches('\'').to_ascii_lowercase();
+        match k.trim() {
+            "ID" => id = v,
+            "ID_LIKE" => id_like = v,
+            _ => {}
         }
-        if lc.contains("fedora") || lc.contains("rhel") || lc.contains("centos") {
-            return "rhel".into();
-        }
-        if lc.contains("arch") || lc.contains("manjaro") {
-            return "arch".into();
-        }
+    }
+    let tokens: Vec<&str> = id
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .chain(id_like.split(|c: char| c.is_whitespace() || c == ','))
+        .filter(|t| !t.is_empty())
+        .collect();
+    let has = |needle: &str| tokens.iter().any(|t| *t == needle);
+    if has("openwrt") {
+        return "openwrt".into();
+    }
+    if has("debian") || has("ubuntu") || has("mint") || has("raspbian") {
+        return "debian".into();
+    }
+    if has("fedora") || has("rhel") || has("centos") || has("rocky") || has("almalinux") {
+        return "rhel".into();
+    }
+    if has("arch") || has("manjaro") || has("endeavouros") {
+        return "arch".into();
     }
     "unknown".into()
 }
@@ -408,4 +464,91 @@ fn firefox_profile_dirs() -> Vec<std::path::PathBuf> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openwrt_os_release_is_not_arch() {
+        // Real OpenWRT 23.05 /etc/os-release. Contains OPENWRT_DEVICE_ARCH
+        // which substring-matches "arch" — the old detector would mis-classify
+        // this as Arch Linux. Regression guard for issue #2.
+        let content = r#"
+NAME="OpenWrt"
+VERSION="23.05.3"
+ID="openwrt"
+ID_LIKE="lede openwrt"
+PRETTY_NAME="OpenWrt 23.05.3"
+VERSION_ID="23.05.3"
+HOME_URL="https://openwrt.org/"
+BUG_URL="https://bugs.openwrt.org/"
+SUPPORT_URL="https://forum.openwrt.org/"
+BUILD_ID="r23809-234f1a2efa"
+OPENWRT_BOARD="x86/64"
+OPENWRT_ARCH="x86_64"
+OPENWRT_TAINTS=""
+OPENWRT_DEVICE_MANUFACTURER="OpenWrt"
+OPENWRT_DEVICE_MANUFACTURER_URL="https://openwrt.org/"
+OPENWRT_DEVICE_PRODUCT="Generic"
+OPENWRT_DEVICE_REVISION="v0"
+OPENWRT_RELEASE="OpenWrt 23.05.3 r23809-234f1a2efa"
+"#;
+        assert_eq!(classify_os_release(content), "openwrt");
+    }
+
+    #[test]
+    fn debian_bullseye_classified_as_debian() {
+        let content = r#"
+PRETTY_NAME="Debian GNU/Linux 11 (bullseye)"
+NAME="Debian GNU/Linux"
+VERSION_ID="11"
+VERSION="11 (bullseye)"
+VERSION_CODENAME=bullseye
+ID=debian
+"#;
+        assert_eq!(classify_os_release(content), "debian");
+    }
+
+    #[test]
+    fn ubuntu_classified_as_debian_via_id_like() {
+        let content = r#"
+NAME="Ubuntu"
+VERSION="22.04.3 LTS (Jammy Jellyfish)"
+ID=ubuntu
+ID_LIKE=debian
+"#;
+        assert_eq!(classify_os_release(content), "debian");
+    }
+
+    #[test]
+    fn fedora_classified_as_rhel() {
+        let content = "ID=fedora\nVERSION_ID=39\n";
+        assert_eq!(classify_os_release(content), "rhel");
+    }
+
+    #[test]
+    fn arch_classified_as_arch() {
+        let content = "ID=arch\nID_LIKE=\n";
+        assert_eq!(classify_os_release(content), "arch");
+    }
+
+    #[test]
+    fn manjaro_classified_as_arch() {
+        let content = "ID=manjaro\nID_LIKE=arch\n";
+        assert_eq!(classify_os_release(content), "arch");
+    }
+
+    #[test]
+    fn empty_os_release_is_unknown() {
+        assert_eq!(classify_os_release(""), "unknown");
+    }
+
+    #[test]
+    fn random_file_with_arch_substring_does_not_match() {
+        // Make sure we don't regress to the old substring-match bug.
+        let content = "SOMEFIELD=maybearchived\nFOO=bar\n";
+        assert_eq!(classify_os_release(content), "unknown");
+    }
 }
