@@ -120,10 +120,10 @@ fn load_form() -> FormState {
     if let Some(c) = existing {
         let sid = match &c.script_id {
             Some(ScriptId::One(s)) => s.clone(),
-            Some(ScriptId::Many(v)) => v.join(", "),
+            Some(ScriptId::Many(v)) => v.join("\n"),
             None => match &c.script_ids {
                 Some(ScriptId::One(s)) => s.clone(),
-                Some(ScriptId::Many(v)) => v.join(", "),
+                Some(ScriptId::Many(v)) => v.join("\n"),
                 None => String::new(),
             },
         };
@@ -178,7 +178,7 @@ impl FormState {
         };
         let ids: Vec<String> = self
             .script_id
-            .split(',')
+            .split(|c: char| c == '\n' || c == ',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
@@ -293,26 +293,29 @@ impl eframe::App for App {
                 .show(ui, |ui| {
                     ui.label("Apps Script ID(s)")
                         .on_hover_text(
-                            "One deployment ID, or several separated by commas.\n\
+                            "One deployment ID per line.\n\
                              With multiple IDs the proxy round-robins between them and\n\
                              automatically sidelines any ID that hits its daily quota (429)\n\
                              or other rate limits for 10 minutes before retrying it."
                         );
-                    ui.add(egui::TextEdit::singleline(&mut self.form.script_id)
-                        .hint_text("id1, id2, id3 …")
-                        .desired_width(f32::INFINITY));
+                    ui.add(egui::TextEdit::multiline(&mut self.form.script_id)
+                        .hint_text("one deployment ID per line")
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(3));
                     ui.end_row();
 
                     let id_count = self.form.script_id
-                        .split(',')
+                        .split(|c: char| c == '\n' || c == ',')
                         .map(|s| s.trim())
                         .filter(|s| !s.is_empty())
                         .count();
-                    if id_count > 1 {
-                        ui.label("");
-                        ui.small(format!("{} IDs — round-robin with auto-failover on quota", id_count));
-                        ui.end_row();
+                    ui.label("");
+                    if id_count <= 1 {
+                        ui.small("Tip: add more IDs (one per line) for round-robin rotation with auto-failover on quota.");
+                    } else {
+                        ui.small(format!("{} IDs — round-robin with auto-failover on quota.", id_count));
                     }
+                    ui.end_row();
 
                     ui.label("Auth key");
                     ui.horizontal(|ui| {
