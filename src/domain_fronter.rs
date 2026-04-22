@@ -83,6 +83,9 @@ pub struct DomainFronter {
     /// response cache isn't busted by the constantly-changing `features`
     /// / `fieldToggles` params.
     normalize_x_graphql: bool,
+    /// Set once we've emitted the "UnknownIssuer means ISP MITM" hint,
+    /// so we don't spam it every time a cert-validation error repeats.
+    cert_hint_shown: std::sync::atomic::AtomicBool,
     tls_connector: TlsConnector,
     pool: Arc<Mutex<Vec<PoolEntry>>>,
     cache: Arc<ResponseCache>,
@@ -179,6 +182,7 @@ impl DomainFronter {
             auth_key: config.auth_key.clone(),
             parallel_relay: config.parallel_relay as usize,
             normalize_x_graphql: config.normalize_x_graphql,
+            cert_hint_shown: std::sync::atomic::AtomicBool::new(false),
             script_ids,
             script_idx: AtomicUsize::new(0),
             tls_connector,
@@ -305,6 +309,43 @@ impl DomainFronter {
             BLACKLIST_COOLDOWN_SECS,
             reason
         );
+    }
+
+    /// Log a relay failure with extra guidance on cert-validation cases.
+    /// Rate-limited so a flood of identical "UnknownIssuer" errors doesn't
+    /// fill the log.
+    fn log_relay_failure(&self, e: &FronterError) {
+        let msg = e.to_string();
+        let is_cert_issue = msg.contains("UnknownIssuer")
+            || msg.contains("invalid peer certificate")
+            || msg.contains("CertificateExpired")
+            || msg.contains("CertNotValidYet")
+            || msg.contains("NotValidForName");
+        if is_cert_issue
+            && !self
+                .cert_hint_shown
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            // First time — print the full diagnostic. Subsequent hits
+            // drop to debug so the log stays readable.
+            tracing::error!(
+                "Relay failed: {} — this almost always means one of:\n  \
+                 (1) your ISP or a middlebox is intercepting TLS to the Google edge \
+                 (common in Iran / IR);\n  \
+                 (2) the `google_ip` in your config is pointing at a non-Google host;\n  \
+                 (3) your system clock is way off (NTP not synced).\n\
+                 Fixes (try in order): run `mhrv-rs scan-ips` to find a different Google \
+                 frontend IP that isn't being MITM'd; check `date` on your host; as a \
+                 LAST RESORT set `\"verify_ssl\": false` in config.json — this lets the \
+                 relay work even through a middlebox, but your traffic is then only \
+                 protected by the Apps Script relay's secret `auth_key`, not by outer TLS.",
+                e
+            );
+        } else if is_cert_issue {
+            tracing::debug!("Relay failed (cert): {}", e);
+        } else {
+            tracing::error!("Relay failed: {}", e);
+        }
     }
 
     fn next_sni(&self) -> String {
@@ -479,7 +520,7 @@ impl DomainFronter {
             Ok(Ok(bytes)) => bytes,
             Ok(Err(e)) => {
                 self.relay_failures.fetch_add(1, Ordering::Relaxed);
-                tracing::error!("Relay failed: {}", e);
+                self.log_relay_failure(&e);
                 return error_response(502, &format!("Relay error: {}", e));
             }
             Err(_) => {
