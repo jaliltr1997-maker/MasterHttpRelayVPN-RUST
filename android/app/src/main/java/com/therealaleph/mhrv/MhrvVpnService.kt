@@ -148,9 +148,10 @@ class MhrvVpnService : VpnService() {
         }
 
         // 2) Establish the TUN. Key Builder calls:
-        //    - addAddress(10.0.0.2/32): our local IP inside the tunnel.
-        //    - addRoute(0.0.0.0/0): capture ALL IPv4 traffic. IPv6 isn't added,
-        //      so v6 leaks stay up the normal route — fine for this app.
+        //    - addAddress(): local v4/v6 IP inside the tunnel.
+        //    - addRoute(0.0.0.0/0 + ::/0): capture ALL IPv4 + IPv6 traffic.
+        //      Some Android apps prefer IPv6-first and looked "untunneled"
+        //      before we added the v6 default route.
         //    - addDnsServer(1.1.1.1): DNS queries go to this IP, which ALSO
         //      hits our TUN — tun2proxy intercepts in Virtual DNS mode.
         //    - addDisallowedApplication(packageName): our OWN outbound
@@ -162,15 +163,12 @@ class MhrvVpnService : VpnService() {
             .setSession("mhrv-rs")
             .setMtu(MTU)
             .addAddress("10.0.0.2", 32)
+            .addAddress("fd00:1:fd00:1::2", 128)
             .addRoute("0.0.0.0", 0)
+            .addRoute("::", 0)
             .addDnsServer("1.1.1.1")
+            .addDnsServer("2606:4700:4700::1111")
             .setBlocking(false)
-        try {
-            builder.addDisallowedApplication(packageName)
-        } catch (e: Throwable) {
-            // Shouldn't happen for our own package, but don't hard-fail.
-            Log.w(TAG, "addDisallowedApplication failed: ${e.message}")
-        }
 
         // Apply user-chosen app splitting on top of the mandatory
         // self-exclusion above.
@@ -190,13 +188,28 @@ class MhrvVpnService : VpnService() {
         // Packages that are not installed (leftover selections from a
         // previous device) throw PackageManager.NameNotFoundException —
         // we log and skip rather than aborting the whole VPN start.
+        val splitOnlyPkgs = cfg.splitApps.filter { it != packageName }
+        val usesAllowList = cfg.splitMode == SplitMode.ONLY && splitOnlyPkgs.isNotEmpty()
+
+        // VpnService doesn't allow mixing allow-list and deny-list APIs on the
+        // same Builder instance. Keep self-exclusion in ALL/EXCEPT; in ONLY mode
+        // we implicitly exclude ourselves by not adding our package to the allow-list.
+        if (!usesAllowList) {
+            try {
+                builder.addDisallowedApplication(packageName)
+            } catch (e: Throwable) {
+                // Shouldn't happen for our own package, but don't hard-fail.
+                Log.w(TAG, "addDisallowedApplication failed: ${e.message}")
+            }
+        }
+
         when (cfg.splitMode) {
             SplitMode.ALL -> { /* no-op */ }
             SplitMode.ONLY -> {
-                if (cfg.splitApps.isEmpty()) {
+                if (splitOnlyPkgs.isEmpty()) {
                     Log.w(TAG, "ONLY mode with empty splitApps list — no app would get the VPN; falling back to ALL")
                 } else {
-                    for (pkg in cfg.splitApps) {
+                    for (pkg in splitOnlyPkgs) {
                         try { builder.addAllowedApplication(pkg) } catch (e: Throwable) {
                             Log.w(TAG, "addAllowedApplication($pkg) failed: ${e.message}")
                         }
@@ -405,7 +418,9 @@ class MhrvVpnService : VpnService() {
         private const val TAG = "MhrvVpnService"
         private const val CHANNEL_ID = "mhrv.vpn.status"
         private const val NOTIF_ID = 0x1001
-        private const val MTU = 1500
+        // Slightly under 1500 to reduce fragmentation/retransmits on common
+        // mobile paths (especially when encapsulation overhead is present).
+        private const val MTU = 1380
         const val ACTION_STOP = "com.therealaleph.mhrv.STOP"
     }
 }
