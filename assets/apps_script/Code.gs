@@ -3,8 +3,9 @@
  *
  * TWO modes:
  *   1. Single:  POST { k, m, u, h, b, ct, r }       → { s, h, b }
- *   2. Batch:   POST { k, q: [{m,u,h,b,ct,r}, ...] } → { q: [{s,h,b}, ...] }
- *      Uses UrlFetchApp.fetchAll() — all URLs fetched IN PARALLEL.
+ *   2. Batch:   POST { k, q: [{m,u,h,b,ct,r}, ...], p? } → { q: [{s,h,b}, ...] }
+ *      Default is SEQUENTIAL (best-effort for CF challenge stability).
+ *      Set p=true to use UrlFetchApp.fetchAll() (parallel/high-throughput).
  *
  * DEPLOYMENT:
  *   1. Go to https://script.google.com → New project
@@ -31,8 +32,8 @@ function doPost(e) {
     var req = JSON.parse(e.postData.contents);
     if (req.k !== AUTH_KEY) return _json({ e: "unauthorized" });
 
-    // Batch mode: { k, q: [...] }
-    if (Array.isArray(req.q)) return _doBatch(req.q);
+    // Batch mode: { k, q: [...], p?: boolean }
+    if (Array.isArray(req.q)) return _doBatch(req.q, req.p === true);
 
     // Single mode
     return _doSingle(req);
@@ -54,7 +55,7 @@ function _doSingle(req) {
   });
 }
 
-function _doBatch(items) {
+function _doBatch(items, useParallel) {
   var fetchArgs = [];
   var errorMap = {};
 
@@ -69,10 +70,20 @@ function _doBatch(items) {
     fetchArgs.push({ _i: i, _o: opts });
   }
 
-  // fetchAll() processes all requests in parallel inside Google
+  // IMPORTANT:
+  // For Cloudflare-protected flows, parallel fan-out can amplify challenge loops
+  // because each subrequest may egress from a different Google IP. Sequential
+  // mode reduces IP churn (best-effort; not a guaranteed fix). Keep p=true only
+  // for non-CF / high-throughput workloads.
   var responses = [];
   if (fetchArgs.length > 0) {
-    responses = UrlFetchApp.fetchAll(fetchArgs.map(function(x) { return x._o; }));
+    if (useParallel) {
+      responses = UrlFetchApp.fetchAll(fetchArgs.map(function(x) { return x._o; }));
+    } else {
+      for (var j = 0; j < fetchArgs.length; j++) {
+        responses.push(UrlFetchApp.fetch(fetchArgs[j]._o.url, fetchArgs[j]._o));
+      }
+    }
   }
 
   var results = [];
